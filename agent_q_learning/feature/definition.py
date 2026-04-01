@@ -46,4 +46,4 @@ def reward_shaping(frame_no, score, terminated, truncated, obs, _obs):
         reward += 0.2
     """
 
-    return reward
+	return reward
