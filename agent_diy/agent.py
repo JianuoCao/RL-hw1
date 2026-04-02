@@ -37,8 +37,6 @@ class Agent(BaseAgent):
         # ε-greedy 探索参数
         self.action_size = Config.ACTION_SIZE
         self.epsilon = Config.EPSILON_START
-        self.epsilon_min = Config.EPSILON_MIN
-        self.epsilon_decay = Config.EPSILON_DECAY
 
         # 算法对象（含 Q 网络、目标网络、经验回放缓冲区）
         self.algorithm = Algorithm(logger)
@@ -85,17 +83,16 @@ class Agent(BaseAgent):
         """
         Build the fixed-length float32 feature vector fed to the Q-network.
 
-        Feature layout (214-dim, consistent with agent_q_learning):
-          [0]       : 1-D state index  pos_x*64 + pos_z
-          [1:65]    : one-hot row  (64 dims)
-          [65:129]  : one-hot col  (64 dims)
-          [129:150] : end / treasure distances from raw_obs  (21 dims)
-          [150:175] : obstacle flat 5×5  (25 dims)
-          [175:200] : treasure flat 5×5  (25 dims)
-          [200:225] : end flat 5×5       (25 dims)
-          [225:…]   : location memory + treasure status
+        Feature layout (134-dim, compact representation):
+          [0:2]     : normalized position (pos_x/63, pos_z/63)
+          [2:23]    : end / treasure distances (21 dims, /6.0)
+          [23:48]   : obstacle flat 5×5  (25 dims)
+          [48:73]   : treasure flat 5×5  (25 dims)
+          [73:98]   : end flat 5×5       (25 dims)
+          [98:123]  : location memory 5×5 (25 dims, clipped & /10)
+          [123:133] : treasure collection status (10 dims)
 
-        构建输入 Q 网络的定长 float32 特征向量（214 维）。
+        构建输入 Q 网络的紧凑定长 float32 特征向量（134 维）。
         """
         if game_info is None:
             # Fallback: use raw_obs directly (e.g. during exploit without state)
@@ -104,17 +101,12 @@ class Agent(BaseAgent):
 
         pos = [int(game_info.pos_x), int(game_info.pos_z)]
 
-        # Feature 1: scalar state index
-        state_idx = [pos[0] * 64 + pos[1]]
+        # Feature 1: normalized position (2 dims, replaces 128-dim one-hot)
+        pos_norm = [pos[0] / 63.0, pos[1] / 63.0]
 
-        # Feature 2 & 3: one-hot row / column
-        pos_row = [0] * 64
-        pos_row[pos[0]] = 1
-        pos_col = [0] * 64
-        pos_col[pos[1]] = 1
-
-        # Feature 4: distances embedded in raw_obs
-        end_treasure_dists = list(raw_obs)
+        # Feature 2: distances from raw_obs (indices 129-149, normalized to [0,1])
+        end_treasure_dists = list(raw_obs[129:150]) if len(raw_obs) >= 150 else list(raw_obs[129:])
+        end_treasure_dists = [d / 6.0 for d in end_treasure_dists]
 
         # Feature 5: local view maps (obstacle / treasure / end), each 5×5
         local_view = [
@@ -127,7 +119,7 @@ class Agent(BaseAgent):
             treasure_flat.extend([1 if v == 4 else 0 for v in row])
             end_flat.extend([1 if v == 3 else 0 for v in row])
 
-        # Feature 6: visited-cell memory within the local view window
+        # Feature 6: visited-cell memory within the local view window (clipped & normalized)
         view = game_info.view
         memory_flat = []
         for i in range(view * 2 + 1):
@@ -135,14 +127,13 @@ class Agent(BaseAgent):
             memory_flat.extend(
                 game_info.location_memory[idx_start: idx_start + view * 2 + 1]
             )
+        memory_flat = [min(v, 10) / 10.0 for v in memory_flat]
 
         # Feature 7: treasure collection status (remap status=2 → 0)
         treasure_status = [x if x != 2 else 0 for x in game_info.treasure_status]
 
         feature = np.concatenate([
-            state_idx,
-            pos_row,
-            pos_col,
+            pos_norm,
             end_treasure_dists,
             obstacle_flat,
             treasure_flat,
